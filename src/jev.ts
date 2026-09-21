@@ -17,6 +17,8 @@ async function evaluateChoice(input: {
   state: {
     cookies?: number;
     cps?: number;
+    clickPower?: number;
+    nextBuildingPrice?: number | null;
     summary?: string;
     affordable?: Record<string, string>;
     bakedAllTime?: number;
@@ -77,11 +79,13 @@ export async function chooseAction(state: GameState): Promise<JevChoice> {
     state: {
       cookies: state.cookies,
       cps: state.cps,
+      clickPower: state.clickPower,
+      nextBuildingPrice: state.nextBuildingPrice,
       summary: state.summary,
       affordable: state.candidates,
     },
     instructions:
-      '次に取るべき一手を選んでください。クッキーを増やし、長期的なCPS成長を優先してください。',
+      'Maximize long-term cookies/sec (CPS). Prefer affordable upgrades, then the building with the highest efficiency (cpsGain/price) / lowest payback. Prefer farm_to_next or farm_clicks_* over waiting. Avoid stop unless stuck.',
     criteria: state.candidates,
   });
 }

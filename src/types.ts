@@ -1,10 +1,31 @@
 /** Compact game observation passed to Jev (and used by the executor). */
+export type BuildingOffer = {
+  id: number;
+  name: string;
+  amount: number;
+  price: number;
+  cpsGain: number;
+  /** Higher is better: cpsGain / price */
+  efficiency: number;
+};
+
+export type UpgradeOffer = {
+  id: number;
+  name: string;
+  price: number;
+};
+
 export type GameState = {
   cookies: number;
   cps: number;
+  clickPower: number;
+  /** Cheapest unlocked building price (even if not affordable yet) */
+  nextBuildingPrice: number | null;
+  buildings: BuildingOffer[];
+  upgrades: UpgradeOffer[];
   /** Human-readable summary for logs */
   summary: string;
-  /** Affordable / always-available action candidates: key -> description */
+  /** Action candidates: key -> description */
   candidates: Record<string, string>;
 };
 

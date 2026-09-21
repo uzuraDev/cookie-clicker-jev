@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium, type Browser, type Page } from 'playwright';
 import {
   armSpeedrun,
   performAscend,
@@ -53,42 +53,75 @@ type CookieGame = {
 export class CookieClickerBrowser {
   private browser: Browser | null = null;
   private page: Page | null = null;
+  /** When true, close() disconnects without quitting the user's Chrome. */
+  private connectedViaCdp = false;
 
   async launch(): Promise<void> {
     const cdpUrl = process.env.CDP_URL?.trim();
-    let context: BrowserContext;
+
     if (cdpUrl) {
       this.browser = await chromium.connectOverCDP(cdpUrl);
-      const existing = this.browser.contexts()[0];
-      if (!existing) {
-        throw new Error(`CDP_URL connected but returned no browser context: ${cdpUrl}`);
+      this.connectedViaCdp = true;
+      const context = this.browser.contexts()[0] ?? (await this.browser.newContext());
+      await context.addInitScript(
+        `try { localStorage.setItem('CookieClickerLang', 'EN'); } catch (e) {}`,
+      );
+      try {
+        await context.addCookies([
+          {
+            name: 'cookieconsent_dismissed',
+            value: 'yes',
+            domain: 'orteil.dashnet.org',
+            path: '/',
+          },
+        ]);
+      } catch {
+        /* existing context may reject cookie writes; overlays still handle consent */
       }
-      context = existing;
-      this.page = await this.pickCdpPage(context);
-      const onGame = this.page.url().includes('orteil.dashnet.org/cookieclicker');
-      if (!onGame) {
-        await this.prepareContext(context);
+      const existing = context
+        .pages()
+        .find((pg) => pg.url().includes('orteil.dashnet.org/cookieclicker'));
+      this.page = existing ?? (await context.newPage());
+      if (!existing) {
         await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
       }
     } else {
       const headless = process.env.HEADLESS !== 'false';
+      const channel = process.env.CHROME_CHANNEL;
       this.browser = await chromium.launch({
         headless,
+        ...(channel ? { channel } : {}),
         args: [
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
           '--disable-renderer-backgrounding',
         ],
       });
-      context = await this.browser.newContext({
+      const context = await this.browser.newContext({
         viewport: { width: 1280, height: 800 },
         locale: 'en-US',
       });
-      await this.prepareContext(context);
+      await context.addInitScript(
+        `try { localStorage.setItem('CookieClickerLang', 'EN'); } catch (e) {}`,
+      );
+      await context.addCookies([
+        {
+          name: 'cookieconsent_dismissed',
+          value: 'yes',
+          domain: 'orteil.dashnet.org',
+          path: '/',
+        },
+      ]);
       this.page = await context.newPage();
-      await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
     }
+
     const page = this.requirePage();
+    if (
+      !this.connectedViaCdp ||
+      !page.url().includes('orteil.dashnet.org/cookieclicker')
+    ) {
+      await page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
+    }
     await this.dismissOverlays();
     await page.waitForSelector('#bigCookie', { timeout: 60_000 });
     await this.waitUntilPlayable();
@@ -194,83 +227,115 @@ export class CookieClickerBrowser {
   }
 
   /**
-   * Observe DOM and build numbered action candidates.
+   * Observe the game and build action candidates.
    * Prefer ids/classes over visible text (EN/JA vary).
+   * Efficient mode (default) ranks buildings by cpsGain/price and offers paced farms.
    */
   async observe(): Promise<GameState> {
     const page = this.requirePage();
+    await this.installEvaluateHelpers();
 
     const snapshot = await page.evaluate(() => {
-      const g = (window as unknown as { Game?: CookieGame }).Game;
-
+      type G = {
+        cookies: number;
+        cookiesPs: number;
+        computedMouseCps?: number;
+        mouseCps?: () => number;
+        ObjectsById?: Array<{
+          id: number;
+          name: string;
+          amount: number;
+          price: number;
+          locked: boolean;
+          bulkPrice?: number;
+          storedCps?: number;
+          cps?: (forAchievement?: boolean) => number;
+          buy?: (n?: number) => void;
+        } | null>;
+        UpgradesById?:
+          | Array<{
+              id: number;
+              name: string;
+              unlocked: boolean;
+              bought: boolean;
+              canBuy: () => boolean;
+              getPrice: () => number;
+            } | null>
+          | Record<
+              string,
+              {
+                id: number;
+                name: string;
+                unlocked: boolean;
+                bought: boolean;
+                canBuy: () => boolean;
+                getPrice: () => number;
+              }
+            >;
+      };
+      const g = (window as unknown as { Game?: G }).Game;
       const cookies = g?.cookies ?? 0;
       const cps = g?.cookiesPs ?? 0;
+      let clickPower = 1;
+      try {
+        clickPower =
+          g?.computedMouseCps ??
+          (typeof g?.mouseCps === 'function' ? g.mouseCps() : 1) ??
+          1;
+      } catch {
+        clickPower = 1;
+      }
 
       type BuildingInfo = {
         id: number;
         name: string;
         amount: number;
         price: number;
+        cpsGain: number;
+        efficiency: number;
         affordable: boolean;
       };
-      type UpgradeInfo = {
-        id: number;
-        name: string;
-        price: number;
-        affordable: boolean;
-      };
+      type UpgradeInfo = { id: number; name: string; price: number };
 
-      const buildings: BuildingInfo[] = [];
-      const productEls = document.querySelectorAll(
-        '#products .product.unlocked.enabled',
-      );
-      productEls.forEach((el) => {
-        const idAttr = el.id?.replace(/^product/, '');
-        const id = idAttr !== undefined && idAttr !== '' ? Number(idAttr) : NaN;
-        if (Number.isNaN(id)) return;
-        const obj = g?.ObjectsById?.[id];
-        const price =
-          obj?.bulkPrice ??
-          obj?.price ??
-          Number(
-            el.querySelector('.price')?.textContent?.replace(/[^0-9.]/g, '') ??
-              0,
-          );
-        buildings.push({
-          id,
-          name: obj?.name ?? `building_${id}`,
-          amount: obj?.amount ?? 0,
-          price,
-          affordable: true,
-        });
-      });
-
-      if (buildings.length === 0 && g?.ObjectsById) {
+      const allUnlocked: BuildingInfo[] = [];
+      if (g?.ObjectsById) {
         for (const obj of g.ObjectsById) {
           if (!obj || obj.locked) continue;
           const price = obj.bulkPrice ?? obj.price;
-          if (cookies >= price) {
-            buildings.push({
-              id: obj.id,
-              name: obj.name,
-              amount: obj.amount,
-              price,
-              affordable: true,
-            });
+          let cpsGain = 0;
+          try {
+            if (typeof obj.cps === 'function') cpsGain = Number(obj.cps(true)) || 0;
+            else if (obj.amount > 0 && obj.storedCps) cpsGain = obj.storedCps / obj.amount;
+            else cpsGain = Number(obj.storedCps) || 0;
+          } catch {
+            cpsGain = 0;
           }
+          const efficiency = price > 0 ? cpsGain / price : 0;
+          allUnlocked.push({
+            id: obj.id,
+            name: obj.name,
+            amount: obj.amount,
+            price,
+            cpsGain,
+            efficiency,
+            affordable: cookies >= price,
+          });
         }
       }
 
+      const buildings = allUnlocked
+        .filter((b) => b.affordable)
+        .sort((a, b) => b.efficiency - a.efficiency);
+
+      const nextBuildingPrice =
+        allUnlocked.length === 0 ? null : Math.min(...allUnlocked.map((b) => b.price));
+
       const upgrades: UpgradeInfo[] = [];
-      const upgradeEls = document.querySelectorAll(
-        '#upgrades .crate.upgrade.enabled',
-      );
+      const upgradeEls = document.querySelectorAll('#upgrades .crate.upgrade.enabled');
       upgradeEls.forEach((el) => {
         const dataId = el.getAttribute('data-id');
         let id = dataId !== null ? Number(dataId) : NaN;
-        if (Number.isNaN(id) && el.id) {
-          id = Number(el.id.replace(/^upgrade/, ''));
-        }
+        if (Number.isNaN(id) && el.id) id = Number(el.id.replace(/^upgrade/, ''));
         if (Number.isNaN(id)) return;
         const up = Array.isArray(g?.UpgradesById)
           ? g?.UpgradesById?.[id]
@@ -281,12 +346,7 @@ export class CookieClickerBrowser {
         } catch {
           price = 0;
         }
-        upgrades.push({
-          id,
-          name: up?.name ?? `upgrade_${id}`,
-          price,
-          affordable: true,
-        });
+        upgrades.push({ id, name: up?.name ?? `upgrade_${id}`, price });
       });
 
       if (upgrades.length === 0 && g?.UpgradesById) {
@@ -301,7 +361,6 @@ export class CookieClickerBrowser {
                 id: up.id,
                 name: up.name,
                 price: up.getPrice(),
-                affordable: true,
               });
             }
           } catch {
@@ -310,43 +369,80 @@ export class CookieClickerBrowser {
         }
       }
 
-      return { cookies, cps, buildings, upgrades };
+      return {
+        cookies,
+        cps,
+        clickPower,
+        nextBuildingPrice,
+        buildings,
+        upgrades,
+      };
     });
 
-    const candidates: Record<string, string> = {
-      click_cookie: 'Click the big cookie once (#bigCookie)',
-      wait_1s: 'Wait 1 second (let cookies accumulate)',
-      wait_5s: 'Wait 5 seconds (let cookies accumulate)',
-    };
+    const efficient = process.env.EFFICIENT !== 'false';
+    const candidates: Record<string, string> = {};
 
-    for (const b of snapshot.buildings) {
-      candidates[`buy_building_${b.id}`] =
-        `Buy building id=${b.id} "${b.name}" (owned ${b.amount}, price ~${Math.round(b.price)})`;
+    if (!efficient) {
+      candidates.click_cookie = 'Click the big cookie once (#bigCookie)';
+      candidates.wait_1s = 'Wait 1 second (let cookies accumulate)';
+      candidates.wait_5s = 'Wait 5 seconds (let cookies accumulate)';
     }
+
     for (const u of snapshot.upgrades) {
       candidates[`buy_upgrade_${u.id}`] =
-        `Buy upgrade id=${u.id} "${u.name}" (price ~${Math.round(u.price)})`;
+        `BUY UPGRADE first if useful: "${u.name}" price=${Math.round(u.price)} (usually high priority)`;
     }
+
+    const topBuildings = snapshot.buildings.slice(0, 5);
+    for (const b of topBuildings) {
+      const payback = b.cpsGain > 0 ? b.price / b.cpsGain : Number.POSITIVE_INFINITY;
+      candidates[`buy_building_${b.id}`] =
+        `Buy "${b.name}" id=${b.id} owned=${b.amount} price=${Math.round(b.price)} cps+${b.cpsGain.toFixed(3)} efficiency=${b.efficiency.toExponential(3)} payback≈${Number.isFinite(payback) ? payback.toFixed(1) + 's' : 'n/a'}`;
+    }
+
+    if (efficient) {
+      candidates.farm_clicks_50 =
+        'Rapid-click the big cookie 50 times (farm toward next purchase)';
+      candidates.farm_clicks_200 = 'Rapid-click the big cookie 200 times (bulk farm)';
+      if (snapshot.nextBuildingPrice != null && snapshot.cookies < snapshot.nextBuildingPrice) {
+        const need = snapshot.nextBuildingPrice - snapshot.cookies;
+        const clicks = Math.max(1, Math.ceil(need / Math.max(snapshot.clickPower, 0.01)));
+        candidates.farm_to_next = `Farm clicks until next building (~${Math.round(snapshot.nextBuildingPrice)} cookies; need ~${Math.round(need)}, ~${clicks} clicks at ${snapshot.clickPower.toFixed(2)}/click)`;
+      }
+    } else {
+      for (const b of snapshot.buildings) {
+        if (candidates[`buy_building_${b.id}`]) continue;
+        candidates[`buy_building_${b.id}`] =
+          `Buy building id=${b.id} "${b.name}" (owned ${b.amount}, price ~${Math.round(b.price)})`;
+      }
+    }
+
     candidates.stop = 'Stop the bot loop (done)';
 
     const buildingList =
       snapshot.buildings.length === 0
         ? 'none'
         : snapshot.buildings
-            .map((b) => `#${b.id} ${b.name}@${Math.round(b.price)}`)
+            .slice(0, 5)
+            .map(
+              (b) =>
+                `#${b.id} ${b.name}@${Math.round(b.price)} eff=${b.efficiency.toExponential(2)}`,
+            )
             .join(', ');
     const upgradeList =
       snapshot.upgrades.length === 0
         ? 'none'
-        : snapshot.upgrades
-            .map((u) => `#${u.id} ${u.name}@${Math.round(u.price)}`)
-            .join(', ');
+        : snapshot.upgrades.map((u) => `#${u.id} ${u.name}@${Math.round(u.price)}`).join(', ');
 
-    const summary = `cookies=${snapshot.cookies.toFixed(1)} cps=${snapshot.cps.toFixed(2)} | buildings: ${buildingList} | upgrades: ${upgradeList}`;
+    const summary = `cookies=${snapshot.cookies.toFixed(1)} cps=${snapshot.cps.toFixed(2)} click=${snapshot.clickPower.toFixed(2)} next=${snapshot.nextBuildingPrice ?? '—'} | buys: ${buildingList} | upgrades: ${upgradeList}`;
 
     return {
       cookies: snapshot.cookies,
       cps: snapshot.cps,
+      clickPower: snapshot.clickPower,
+      nextBuildingPrice: snapshot.nextBuildingPrice,
+      buildings: snapshot.buildings,
+      upgrades: snapshot.upgrades,
       summary,
       candidates,
     };
@@ -354,6 +450,7 @@ export class CookieClickerBrowser {
 
   async act(action: string): Promise<ActResult> {
     const page = this.requirePage();
+    await this.installEvaluateHelpers();
 
     try {
       if (action === 'click_cookie') {
@@ -367,11 +464,90 @@ export class CookieClickerBrowser {
           return false;
         });
         if (!viaApi) {
-          await page
-            .locator('#bigCookie')
-            .click({ timeout: 5000, force: true });
+          await page.locator('#bigCookie').click({ timeout: 5000, force: true });
         }
         return { ok: true, message: viaApi ? 'Game.ClickCookie()' : 'Clicked #bigCookie' };
+      }
+
+      const farmMatch = /^farm_clicks_(\d+)$/.exec(action);
+      if (farmMatch) {
+        // Cookie Clicker ignores inhuman click rates; pace ~12 clicks/sec.
+        const n = Math.min(Number(farmMatch[1]), 240);
+        let clicks = 0;
+        for (let i = 0; i < n; i++) {
+          const ok = await page.evaluate(() => {
+            const g = (window as unknown as { Game?: CookieGame }).Game;
+            if (!g?.ClickCookie) return false;
+            g.ClickCookie();
+            return true;
+          });
+          if (!ok) break;
+          clicks++;
+          await page.waitForTimeout(80);
+        }
+        const cookies = await page.evaluate(() => {
+          return (window as unknown as { Game?: CookieGame }).Game?.cookies ?? 0;
+        });
+        return {
+          ok: clicks > 0,
+          message: `Farm-clicked ${clicks} paced → ${cookies.toFixed(1)} cookies`,
+        };
+      }
+
+      if (action === 'farm_to_next') {
+        // Mix paced clicks + idle CPS until the next cheapest building is affordable.
+        const farmMs = Number(process.env.FARM_MS ?? '8000');
+        const started = Date.now();
+        let clicks = 0;
+        const target = await page.evaluate(() => {
+          const g = (
+            window as unknown as {
+              Game?: CookieGame & {
+                ObjectsById?: Array<{
+                  locked: boolean;
+                  price: number;
+                  bulkPrice?: number;
+                } | null>;
+              };
+            }
+          ).Game;
+          let t = Number.POSITIVE_INFINITY;
+          if (g?.ObjectsById) {
+            for (const obj of g.ObjectsById) {
+              if (!obj || obj.locked) continue;
+              const price = obj.bulkPrice ?? obj.price;
+              if (price < t) t = price;
+            }
+          }
+          return Number.isFinite(t) ? t : 0;
+        });
+
+        while (Date.now() - started < farmMs) {
+          const status = await page.evaluate((tgt) => {
+            const g = (window as unknown as { Game?: CookieGame }).Game;
+            if (!g) return { cookies: 0, done: true };
+            if (g.cookies >= tgt) return { cookies: g.cookies, done: true };
+            if (g.ClickCookie) g.ClickCookie();
+            return { cookies: g.cookies, done: false };
+          }, target);
+          if (status.done) {
+            return {
+              ok: true,
+              message: `Farm-to-next done: ${clicks} clicks → ${status.cookies.toFixed(1)} (target ${target})`,
+            };
+          }
+          clicks++;
+          // ~12 clicks/sec stays above the ~67ms Uncanny threshold and the 20ms discard floor.
+          await page.waitForTimeout(80);
+        }
+
+        const cookies = await page.evaluate(() => {
+          return (window as unknown as { Game?: CookieGame }).Game?.cookies ?? 0;
+        });
+        return {
+          ok: true,
+          message: `Farm-to-next partial: ${clicks} clicks → ${cookies.toFixed(1)} / ${target} in ${farmMs}ms`,
+        };
       }
 
       if (action === 'wait_1s') {
@@ -629,6 +805,28 @@ export class CookieClickerBrowser {
   }
 
   async close(): Promise<void> {
+    if (this.connectedViaCdp) {
+      // Leave the user's real Chrome running. KEEP_TAB=true keeps Cookie Clicker open.
+      const keepTab = process.env.KEEP_TAB !== 'false';
+      if (!keepTab) {
+        try {
+          if (this.page && !this.page.isClosed()) {
+            await this.page.close();
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        await this.browser?.close(); // disconnects CDP; does not quit Chrome
+      } catch {
+        /* ignore */
+      }
+      this.browser = null;
+      this.page = null;
+      this.connectedViaCdp = false;
+      return;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
@@ -642,29 +840,6 @@ export class CookieClickerBrowser {
    */
   private async installEvaluateHelpers(): Promise<void> {
     await this.requirePage().evaluate('globalThis.__name = (fn) => fn');
-  }
-
-  /** English + consent cookie so the game does not reload and we never click the blank-target consent link. */
-  private async prepareContext(context: BrowserContext): Promise<void> {
-    await context.addInitScript(
-      `try { localStorage.setItem('CookieClickerLang', 'EN'); } catch (e) {}`,
-    );
-    await context.addCookies([
-      {
-        name: 'cookieconsent_dismissed',
-        value: 'yes',
-        domain: 'orteil.dashnet.org',
-        path: '/',
-      },
-    ]);
-  }
-
-  private async pickCdpPage(context: BrowserContext): Promise<Page> {
-    const pages = context.pages();
-    const onGame = pages.find((page) => page.url().includes('orteil.dashnet.org/cookieclicker'));
-    if (onGame) return onGame;
-    if (pages[0]) return pages[0];
-    return context.newPage();
   }
 
   private requirePage(): Page {

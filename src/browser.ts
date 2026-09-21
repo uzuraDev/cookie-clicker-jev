@@ -1,5 +1,12 @@
-import { chromium, type Browser, type Page } from 'playwright';
-import type { ActResult, GameState } from './types.js';
+import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import {
+  armSpeedrun,
+  performAscend,
+  readAscendProgress,
+  readSpeedrunSnapshot,
+  stopSpeedrunFarmer,
+} from './speedrun/ingame.js';
+import type { ActResult, AscendAttempt, AscendProgress, GameState, SpeedrunSnapshot } from './types.js';
 
 const GAME_URL = 'https://orteil.dashnet.org/cookieclicker/';
 
@@ -48,31 +55,46 @@ export class CookieClickerBrowser {
   private page: Page | null = null;
 
   async launch(): Promise<void> {
-    const headless = process.env.HEADLESS !== 'false';
-    this.browser = await chromium.launch({ headless });
-    const context = await this.browser.newContext({
-      viewport: { width: 1280, height: 800 },
-      locale: 'en-US',
-    });
-    // Preset English and the consent cookie so the game does not reload
-    // (a reload is often stopped by Cloudflare) and so we never click the
-    // consent link, which is `<a target="_blank">`.
-    await context.addInitScript(
-      `try { localStorage.setItem('CookieClickerLang', 'EN'); } catch (e) {}`,
-    );
-    await context.addCookies([
-      {
-        name: 'cookieconsent_dismissed',
-        value: 'yes',
-        domain: 'orteil.dashnet.org',
-        path: '/',
-      },
-    ]);
-    this.page = await context.newPage();
-    await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
+    const cdpUrl = process.env.CDP_URL?.trim();
+    let context: BrowserContext;
+    if (cdpUrl) {
+      this.browser = await chromium.connectOverCDP(cdpUrl);
+      const existing = this.browser.contexts()[0];
+      if (!existing) {
+        throw new Error(`CDP_URL connected but returned no browser context: ${cdpUrl}`);
+      }
+      context = existing;
+      this.page = await this.pickCdpPage(context);
+      const onGame = this.page.url().includes('orteil.dashnet.org/cookieclicker');
+      if (!onGame) {
+        await this.prepareContext(context);
+        await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
+      }
+    } else {
+      const headless = process.env.HEADLESS !== 'false';
+      this.browser = await chromium.launch({
+        headless,
+        args: [
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+        ],
+      });
+      context = await this.browser.newContext({
+        viewport: { width: 1280, height: 800 },
+        locale: 'en-US',
+      });
+      await this.prepareContext(context);
+      this.page = await context.newPage();
+      await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
+    }
+    const page = this.requirePage();
     await this.dismissOverlays();
-    await this.page.waitForSelector('#bigCookie', { timeout: 60_000 });
+    await page.waitForSelector('#bigCookie', { timeout: 60_000 });
     await this.waitUntilPlayable();
+    // tsx/esbuild names nested functions with a `__name` helper that does not
+    // exist in the page. Playwright sends the function source as-is.
+    await this.installEvaluateHelpers();
   }
 
   /** Dismiss language picker, cookie consent, update notes if present. */
@@ -529,12 +551,120 @@ export class CookieClickerBrowser {
     };
   }
 
+  /**
+   * Same outcome as confirming both Wipe Save prompts: `Game.HardReset(2)`.
+   * This deletes the save in the current page (ephemeral for a launched
+   * browser; the attached profile when `CDP_URL` is set).
+   */
+  async wipeSave(): Promise<void> {
+    await this.installEvaluateHelpers();
+    const page = this.requirePage();
+    const wiped = await page.evaluate(() => {
+      const g = (window as unknown as { Game?: { HardReset?: (bypass?: number) => void } }).Game;
+      if (!g?.HardReset) return false;
+      g.HardReset(2);
+      return true;
+    });
+    if (!wiped) throw new Error('Game.HardReset is not available');
+  }
+
+  /** Fresh run can accept clicks (`Game.T >= 3`, nothing baked, not ascending). */
+  async waitUntilFreshRun(): Promise<void> {
+    const page = this.requirePage();
+    await page.waitForFunction(
+      () => {
+        const g = (
+          window as unknown as {
+            Game?: {
+              ready?: boolean;
+              OnAscend?: number;
+              AscendTimer?: number;
+              cookiesEarned?: number;
+              prestige?: number;
+              T?: number;
+            };
+          }
+        ).Game;
+        if (!g || g.ready === false) return false;
+        if (g.OnAscend) return false;
+        if ((g.AscendTimer ?? 0) > 0) return false;
+        if ((g.cookiesEarned ?? 1) >= 1) return false;
+        if ((g.prestige ?? 1) !== 0) return false;
+        return (g.T ?? 0) >= 3;
+      },
+      undefined,
+      { timeout: 30_000 },
+    );
+  }
+
+  /** Start the in-page clock, click loop, and golden-cookie popper. */
+  async armSpeedrun(clickIntervalMs: number): Promise<{ t0: number; version: string }> {
+    await this.installEvaluateHelpers();
+    const page = this.requirePage();
+    return page.evaluate(armSpeedrun, clickIntervalMs);
+  }
+
+  async stopSpeedrunFarmer(): Promise<void> {
+    await this.installEvaluateHelpers();
+    const page = this.requirePage();
+    await page.evaluate(stopSpeedrunFarmer);
+  }
+
+  async readSpeedrunSnapshot(): Promise<SpeedrunSnapshot> {
+    await this.installEvaluateHelpers();
+    const page = this.requirePage();
+    return page.evaluate(readSpeedrunSnapshot);
+  }
+
+  async performAscend(): Promise<AscendAttempt> {
+    await this.installEvaluateHelpers();
+    const page = this.requirePage();
+    return page.evaluate(performAscend);
+  }
+
+  async readAscendProgress(): Promise<AscendProgress> {
+    await this.installEvaluateHelpers();
+    const page = this.requirePage();
+    return page.evaluate(readAscendProgress);
+  }
+
   async close(): Promise<void> {
     if (this.browser) {
       await this.browser.close();
       this.browser = null;
       this.page = null;
     }
+  }
+
+  /**
+   * `__name(fn, "name")` is injected by the TypeScript loader. It must return
+   * `fn`, because the page script uses the return value.
+   */
+  private async installEvaluateHelpers(): Promise<void> {
+    await this.requirePage().evaluate('globalThis.__name = (fn) => fn');
+  }
+
+  /** English + consent cookie so the game does not reload and we never click the blank-target consent link. */
+  private async prepareContext(context: BrowserContext): Promise<void> {
+    await context.addInitScript(
+      `try { localStorage.setItem('CookieClickerLang', 'EN'); } catch (e) {}`,
+    );
+    await context.addCookies([
+      {
+        name: 'cookieconsent_dismissed',
+        value: 'yes',
+        domain: 'orteil.dashnet.org',
+        path: '/',
+      },
+    ]);
+  }
+
+  private async pickCdpPage(context: BrowserContext): Promise<Page> {
+    const pages = context.pages();
+    const onGame = pages.find((page) => page.url().includes('orteil.dashnet.org/cookieclicker'));
+    if (onGame) return onGame;
+    if (pages[0]) return pages[0];
+    return context.newPage();
   }
 
   private requirePage(): Page {

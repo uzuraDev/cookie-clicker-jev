@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
+    "speedrun:1hc": "SPEEDRUN_1HC=true tsx src/index.ts",
+    "test": "node --import tsx --test src/speedrun/speedrun.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

@@ -1,0 +1,30 @@
+{
+  "name": "cookie-clicker-jev",
+  "version": "1.0.0",
+  "description": "Minimal Cookie Clicker loop driven by Jev via Vercel AI Gateway",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "cookie-clicker",
+    "jev",
+    "ai-gateway",
+    "playwright"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "ai": "^7.0.107",
+    "dotenv": "^18.0.1",
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2"
+  }
+}

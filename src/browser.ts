@@ -7,6 +7,8 @@ type CookieGame = {
   cookies: number;
   cookiesPs: number;
   ready?: boolean;
+  /** 1 = buy, -1 = sell. `Object.buy` sells when this is -1. */
+  buyMode?: number;
   ObjectsById?: Array<{
     id: number;
     name: string;
@@ -14,6 +16,7 @@ type CookieGame = {
     price: number;
     locked: boolean;
     bulkPrice?: number;
+    buy?: (amount?: number) => number | void;
   } | null>;
   UpgradesById?:
     | Array<{
@@ -23,6 +26,7 @@ type CookieGame = {
         bought: boolean;
         canBuy: () => boolean;
         getPrice: () => number;
+        buy?: (bypass?: boolean) => number;
       } | null>
     | Record<
         string,
@@ -33,6 +37,7 @@ type CookieGame = {
           bought: boolean;
           canBuy: () => boolean;
           getPrice: () => number;
+          buy?: (bypass?: boolean) => number;
         }
       >;
   ClickCookie?: () => void;
@@ -49,6 +54,20 @@ export class CookieClickerBrowser {
       viewport: { width: 1280, height: 800 },
       locale: 'en-US',
     });
+    // Preset English and the consent cookie so the game does not reload
+    // (a reload is often stopped by Cloudflare) and so we never click the
+    // consent link, which is `<a target="_blank">`.
+    await context.addInitScript(
+      `try { localStorage.setItem('CookieClickerLang', 'EN'); } catch (e) {}`,
+    );
+    await context.addCookies([
+      {
+        name: 'cookieconsent_dismissed',
+        value: 'yes',
+        domain: 'orteil.dashnet.org',
+        path: '/',
+      },
+    ]);
     this.page = await context.newPage();
     await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
     await this.dismissOverlays();
@@ -60,9 +79,21 @@ export class CookieClickerBrowser {
   private async dismissOverlays(): Promise<void> {
     const page = this.requirePage();
 
+    // Remove the consent banner in-page. Its "Got it!" control is an anchor
+    // with target=_blank, so a Playwright click leaves Cookie Clicker.
+    // Close every stacked note. Do not click #prefsButton — that opens Options.
+    await page.evaluate(() => {
+      document
+        .querySelectorAll('.cc_banner-wrapper, .cc_container')
+        .forEach((el) => el.remove());
+      document.querySelectorAll('#notes .note .close').forEach((el) => {
+        (el as HTMLElement).click();
+      });
+    });
+
     const langEn = page.locator('#langSelect-EN');
     try {
-      if (await langEn.isVisible({ timeout: 8000 })) {
+      if (await langEn.isVisible({ timeout: 1000 })) {
         await langEn.click();
         await page.waitForTimeout(2000);
       }
@@ -74,9 +105,7 @@ export class CookieClickerBrowser {
       '#noteClose',
       '.note .close',
       '#promptClose',
-      '#prefsButton',
       '#cookieConsentClose',
-      'a.cc_btn_accept_all',
       '.cc-dismiss',
       '#onesignal-slidedown-cancel-button',
       '#offGameMessage a',
@@ -339,25 +368,20 @@ export class CookieClickerBrowser {
 
       const buildingMatch = /^buy_building_(\d+)$/.exec(action);
       if (buildingMatch) {
-        const id = buildingMatch[1];
-        const sel = `#product${id}`;
-        await page.locator(sel).click({ timeout: 5000, force: true });
-        return { ok: true, message: `Clicked ${sel}` };
+        const id = Number(buildingMatch[1]);
+        if (!Number.isInteger(id)) {
+          return { ok: false, message: `Bad building id: ${action}` };
+        }
+        return this.buyBuilding(id);
       }
 
       const upgradeMatch = /^buy_upgrade_(\d+)$/.exec(action);
       if (upgradeMatch) {
-        const id = upgradeMatch[1];
-        const byId = page.locator(`#upgrade${id}`);
-        if (await byId.count()) {
-          await byId.click({ timeout: 5000, force: true });
-          return { ok: true, message: `Clicked #upgrade${id}` };
+        const id = Number(upgradeMatch[1]);
+        if (!Number.isInteger(id)) {
+          return { ok: false, message: `Bad upgrade id: ${action}` };
         }
-        const byData = page.locator(
-          `#upgrades .crate.upgrade[data-id="${id}"]`,
-        );
-        await byData.first().click({ timeout: 5000, force: true });
-        return { ok: true, message: `Clicked upgrade data-id=${id}` };
+        return this.buyUpgrade(id);
       }
 
       return { ok: false, message: `Unknown action: ${action}` };
@@ -365,6 +389,144 @@ export class CookieClickerBrowser {
       const msg = err instanceof Error ? err.message : String(err);
       return { ok: false, message: `Act failed (${action}): ${msg}` };
     }
+  }
+
+  /**
+   * Buy one building with ObjectsById[id].buy(1), the same idea as
+   * Game.ClickCookie: the store row is often covered, and a forced DOM click
+   * does not tell us whether the purchase happened. `buy()` returns void, so
+   * success is an increased owned count.
+   */
+  private async buyBuilding(id: number): Promise<ActResult> {
+    const page = this.requirePage();
+    const sel = `#product${id}`;
+    const attempt = await page.evaluate((buildingId) => {
+      const g = (window as unknown as { Game?: CookieGame }).Game;
+      const obj = g?.ObjectsById?.[buildingId];
+      if (!g || !obj) return { status: 'missing' as const, amount: 0, name: '' };
+      if (g.buyMode === -1) return { status: 'sell' as const, amount: obj.amount, name: obj.name };
+      if (obj.locked) return { status: 'locked' as const, amount: obj.amount, name: obj.name };
+      const price = obj.bulkPrice ?? obj.price;
+      if (g.cookies < price) {
+        return { status: 'poor' as const, amount: obj.amount, name: obj.name };
+      }
+      const before = obj.amount;
+      if (typeof obj.buy !== 'function') {
+        return { status: 'noapi' as const, amount: before, name: obj.name };
+      }
+      obj.buy(1);
+      return {
+        status: 'done' as const,
+        amount: obj.amount,
+        before,
+        name: obj.name,
+      };
+    }, id);
+
+    if (attempt.status === 'missing') return { ok: false, message: `No building ${sel}` };
+    if (attempt.status === 'sell') {
+      return { ok: false, message: 'Store is in Sell mode; not buying' };
+    }
+    if (attempt.status === 'locked') return { ok: false, message: `${sel} is still locked` };
+    if (attempt.status === 'poor') return { ok: false, message: `${sel} is not affordable` };
+    if (attempt.status === 'done') {
+      const before = attempt.before;
+      const ok = attempt.amount > before;
+      return {
+        ok,
+        message: ok
+          ? `Bought ${sel} "${attempt.name}" (owned ${before} → ${attempt.amount})`
+          : `${sel} buy() left owned at ${attempt.amount}`,
+      };
+    }
+
+    await page.locator(sel).click({ timeout: 5000, force: true });
+    const amount = await page.evaluate((buildingId) => {
+      return (
+        (window as unknown as { Game?: CookieGame }).Game?.ObjectsById?.[buildingId]
+          ?.amount ?? 0
+      );
+    }, id);
+    const ok = amount > attempt.amount;
+    return {
+      ok,
+      message: ok
+        ? `Clicked ${sel} (owned ${attempt.amount} → ${amount})`
+        : `Clicked ${sel} but owned stayed ${amount}`,
+    };
+  }
+
+  /**
+   * Buy one upgrade with UpgradesById[id].buy(). The crate can stay
+   * visually `enabled` until the next draw, so success is the bought flag
+   * (buy() also returns 1).
+   */
+  private async buyUpgrade(id: number): Promise<ActResult> {
+    const page = this.requirePage();
+    const sel = `#upgrade${id}`;
+    const attempt = await page.evaluate((upgradeId) => {
+      const g = (window as unknown as { Game?: CookieGame }).Game;
+      const list = g?.UpgradesById;
+      const up = !list
+        ? undefined
+        : Array.isArray(list)
+          ? list[upgradeId]
+          : list[String(upgradeId)];
+      if (!g || !up) return { status: 'missing' as const, name: '' };
+      if (up.bought) return { status: 'have' as const, name: up.name };
+      let affordable = false;
+      try {
+        affordable = up.canBuy();
+      } catch {
+        affordable = false;
+      }
+      if (!affordable) return { status: 'poor' as const, name: up.name };
+      if (typeof up.buy !== 'function') return { status: 'noapi' as const, name: up.name };
+      const result = up.buy();
+      return {
+        status: 'done' as const,
+        name: up.name,
+        ok: result === 1 || Boolean(up.bought),
+      };
+    }, id);
+
+    if (attempt.status === 'missing') return { ok: false, message: `No upgrade ${sel}` };
+    if (attempt.status === 'have') return { ok: false, message: `${sel} is already bought` };
+    if (attempt.status === 'poor') {
+      return { ok: false, message: `${sel} "${attempt.name}" is not affordable` };
+    }
+    if (attempt.status === 'done') {
+      return {
+        ok: attempt.ok === true,
+        message:
+          attempt.ok === true
+            ? `Bought ${sel} "${attempt.name}"`
+            : `${sel} buy() did not purchase "${attempt.name}"`,
+      };
+    }
+
+    const byId = page.locator(sel);
+    if (await byId.count()) {
+      await byId.click({ timeout: 5000, force: true });
+    } else {
+      await page
+        .locator(`#upgrades .crate.upgrade[data-id="${id}"]`)
+        .first()
+        .click({ timeout: 5000, force: true });
+    }
+    const bought = await page.evaluate((upgradeId) => {
+      const list = (window as unknown as { Game?: CookieGame }).Game?.UpgradesById;
+      const up = !list
+        ? undefined
+        : Array.isArray(list)
+          ? list[upgradeId]
+          : list[String(upgradeId)];
+      return Boolean(up?.bought);
+    }, id);
+    return {
+      ok: bought,
+      message: bought ? `Clicked ${sel}` : `Clicked ${sel} but it is still unbought`,
+    };
   }
 
   async close(): Promise<void> {

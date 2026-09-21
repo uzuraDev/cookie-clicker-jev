@@ -36,8 +36,16 @@ async function main(): Promise<void> {
   console.log('Game ready. Starting Jev decision loop.\n');
 
   for (let step = 1; step <= MAX_STEPS && !stopping; step++) {
-    const state = await browser.observe();
     console.log(`── step ${step}/${MAX_STEPS} ──`);
+    let state;
+    try {
+      state = await browser.observe();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`observe error: ${msg}`);
+      await new Promise((r) => setTimeout(r, 1000));
+      continue;
+    }
     console.log(`state: ${state.summary}`);
     console.log(
       `candidates (${Object.keys(state.candidates).length}): ${Object.keys(state.candidates).join(', ')}`,

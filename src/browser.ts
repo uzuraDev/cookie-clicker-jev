@@ -6,6 +6,7 @@ const GAME_URL = 'https://orteil.dashnet.org/cookieclicker/';
 type CookieGame = {
   cookies: number;
   cookiesPs: number;
+  ready?: boolean;
   ObjectsById?: Array<{
     id: number;
     name: string;
@@ -13,15 +14,28 @@ type CookieGame = {
     price: number;
     locked: boolean;
     bulkPrice?: number;
-  }>;
-  UpgradesById?: Array<{
-    id: number;
-    name: string;
-    unlocked: boolean;
-    bought: boolean;
-    canBuy: () => boolean;
-    getPrice: () => number;
-  }>;
+  } | null>;
+  UpgradesById?:
+    | Array<{
+        id: number;
+        name: string;
+        unlocked: boolean;
+        bought: boolean;
+        canBuy: () => boolean;
+        getPrice: () => number;
+      } | null>
+    | Record<
+        string,
+        {
+          id: number;
+          name: string;
+          unlocked: boolean;
+          bought: boolean;
+          canBuy: () => boolean;
+          getPrice: () => number;
+        }
+      >;
+  ClickCookie?: () => void;
 };
 
 export class CookieClickerBrowser {
@@ -39,7 +53,7 @@ export class CookieClickerBrowser {
     await this.page.goto(GAME_URL, { waitUntil: 'domcontentloaded' });
     await this.dismissOverlays();
     await this.page.waitForSelector('#bigCookie', { timeout: 60_000 });
-    await this.page.waitForTimeout(1500);
+    await this.waitUntilPlayable();
   }
 
   /** Dismiss language picker, cookie consent, update notes if present. */
@@ -48,9 +62,9 @@ export class CookieClickerBrowser {
 
     const langEn = page.locator('#langSelect-EN');
     try {
-      if (await langEn.isVisible({ timeout: 5000 })) {
+      if (await langEn.isVisible({ timeout: 8000 })) {
         await langEn.click();
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(2000);
       }
     } catch {
       /* ignore */
@@ -60,10 +74,13 @@ export class CookieClickerBrowser {
       '#noteClose',
       '.note .close',
       '#promptClose',
+      '#prefsButton',
       '#cookieConsentClose',
       'a.cc_btn_accept_all',
       '.cc-dismiss',
       '#onesignal-slidedown-cancel-button',
+      '#offGameMessage a',
+      '#offGameMessageClose',
     ];
     for (const sel of dismissSelectors) {
       try {
@@ -76,6 +93,53 @@ export class CookieClickerBrowser {
         /* ignore */
       }
     }
+  }
+
+  /** Wait until loader/darken are gone and Game is ready. */
+  private async waitUntilPlayable(): Promise<void> {
+    const page = this.requirePage();
+    // Playwright signature: waitForFunction(fn, arg?, options?)
+    await page.waitForFunction(
+      () => {
+        const g = (window as unknown as { Game?: { ready?: boolean; cookies?: number } }).Game;
+        if (!g) return false;
+        // Cookie Clicker sets Game.ready when fully loaded
+        if (g.ready === false) return false;
+        const loader = document.getElementById('loader');
+        if (loader) {
+          const s = getComputedStyle(loader);
+          if (s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05) {
+            return false;
+          }
+        }
+        const wrap = document.getElementById('offGameMessageWrap');
+        if (wrap) {
+          const s = getComputedStyle(wrap);
+          if (s.display !== 'none' && s.visibility !== 'hidden' && Number(s.opacity) > 0.05) {
+            // Still showing boot message — not playable yet
+            return false;
+          }
+        }
+        return typeof g.cookies === 'number';
+      },
+      undefined,
+      { timeout: 120_000 },
+    );
+    // Hide leftover darken via CSS if stuck (non-interactive)
+    await page.evaluate(() => {
+      const darken = document.getElementById('darken');
+      if (darken) {
+        darken.style.display = 'none';
+        darken.style.pointerEvents = 'none';
+      }
+      const wrap = document.getElementById('offGameMessageWrap');
+      if (wrap) {
+        wrap.style.display = 'none';
+        wrap.style.pointerEvents = 'none';
+      }
+    });
+    await page.waitForTimeout(500);
+    await this.dismissOverlays();
   }
 
   /**
@@ -157,8 +221,15 @@ export class CookieClickerBrowser {
           id = Number(el.id.replace(/^upgrade/, ''));
         }
         if (Number.isNaN(id)) return;
-        const up = g?.UpgradesById?.[id];
-        const price = up?.getPrice?.() ?? 0;
+        const up = Array.isArray(g?.UpgradesById)
+          ? g?.UpgradesById?.[id]
+          : g?.UpgradesById?.[String(id)];
+        let price = 0;
+        try {
+          price = up?.getPrice?.() ?? 0;
+        } catch {
+          price = 0;
+        }
         upgrades.push({
           id,
           name: up?.name ?? `upgrade_${id}`,
@@ -168,7 +239,10 @@ export class CookieClickerBrowser {
       });
 
       if (upgrades.length === 0 && g?.UpgradesById) {
-        for (const up of g.UpgradesById) {
+        const list = Array.isArray(g.UpgradesById)
+          ? g.UpgradesById
+          : Object.values(g.UpgradesById);
+        for (const up of list) {
           if (!up || !up.unlocked || up.bought) continue;
           try {
             if (up.canBuy()) {
@@ -232,8 +306,21 @@ export class CookieClickerBrowser {
 
     try {
       if (action === 'click_cookie') {
-        await page.locator('#bigCookie').click({ timeout: 5000 });
-        return { ok: true, message: 'Clicked #bigCookie' };
+        // Prefer Game API — overlays often intercept locator clicks during boot
+        const viaApi = await page.evaluate(() => {
+          const g = (window as unknown as { Game?: CookieGame }).Game;
+          if (g?.ClickCookie) {
+            g.ClickCookie();
+            return true;
+          }
+          return false;
+        });
+        if (!viaApi) {
+          await page
+            .locator('#bigCookie')
+            .click({ timeout: 5000, force: true });
+        }
+        return { ok: true, message: viaApi ? 'Game.ClickCookie()' : 'Clicked #bigCookie' };
       }
 
       if (action === 'wait_1s') {
@@ -254,7 +341,7 @@ export class CookieClickerBrowser {
       if (buildingMatch) {
         const id = buildingMatch[1];
         const sel = `#product${id}`;
-        await page.locator(sel).click({ timeout: 5000 });
+        await page.locator(sel).click({ timeout: 5000, force: true });
         return { ok: true, message: `Clicked ${sel}` };
       }
 
@@ -263,13 +350,13 @@ export class CookieClickerBrowser {
         const id = upgradeMatch[1];
         const byId = page.locator(`#upgrade${id}`);
         if (await byId.count()) {
-          await byId.click({ timeout: 5000 });
+          await byId.click({ timeout: 5000, force: true });
           return { ok: true, message: `Clicked #upgrade${id}` };
         }
         const byData = page.locator(
           `#upgrades .crate.upgrade[data-id="${id}"]`,
         );
-        await byData.first().click({ timeout: 5000 });
+        await byData.first().click({ timeout: 5000, force: true });
         return { ok: true, message: `Clicked upgrade data-id=${id}` };
       }
 

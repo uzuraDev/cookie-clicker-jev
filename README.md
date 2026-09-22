@@ -1,201 +1,201 @@
 # cookie-clicker-jev
 
-Minimal loop that plays [Cookie Clicker](https://orteil.dashnet.org/cookieclicker/) in a browser, while **Jev** (via [Vercel AI Gateway](https://vercel.com/docs/ai-gateway)) decides only when a choice is actually close.
+ブラウザで [Cookie Clicker](https://orteil.dashnet.org/cookieclicker/) を回す、最小限のループです。選択が本当に僅差のときだけ、**Jev**（[Vercel AI Gateway](https://vercel.com/docs/ai-gateway) 経由）が決めます。
 
-Two modes:
+モードは二つあります。
 
-- **Default (efficient)** — paced big-cookie farms when nothing is affordable, a local buy when there is a single purchase or an upgrade, and a Jev Choice only when several buildings are close. `EFFICIENT=false` restores one Jev Choice per step (`click` / `wait` / `buy` / `stop`).
-- **1 Heavenly Chip** — a timed speedrun on the same browser boot. The page clicks and pops golden cookies itself. Local ROI buys buildings and upgrades. Jev is called only to break a close purchase tie.
+- **デフォルト（efficient）** — 買えるものがなければ、間隔を置いて大クッキーを稼ぐ。購入候補が一つだけ、またはアップグレードがあるときは、ローカルで買う。建物が複数で僅差のときだけ、Jev の Choice を使う。`EFFICIENT=false` にすると、毎ステップ Jev が一つ選ぶように戻る（`click` / `wait` / `buy` / `stop`）。
+- **1 Heavenly Chip** — 同じブラウザ起動で行う、タイム計測つきのスピードラン。クリックとゴールデンクッキーの回収は、ページ自身が行う。建物とアップグレードはローカルの ROI で買う。Jev を呼ぶのは、購入が僅差のときだけ。
 
-Architecture (DOM observe → candidates → local rule or Jev Choice → execute):
+アーキテクチャ（DOM の観測 → 候補 → ローカルのルールまたは Jev の Choice → 実行）:
 
-1. **Playwright** opens Cookie Clicker, or attaches with `CDP_URL`
-2. App code observes the game and builds action candidates (ROI in efficient mode)
-3. Local rules farm or buy when the choice is obvious; **Jev** (`typesafe-ai/jev`) picks via `experimental_evaluate` Choice when it is not
-4. App code executes the click, farm, wait, or buy and loops
+1. **Playwright** が Cookie Clicker を開く。または `CDP_URL` で接続する
+2. アプリのコードがゲームを観測し、行動の候補を作る（efficient モードでは ROI 付き）
+3. 選択が明らかなら、ローカルのルールが稼ぐか買う。明らかでなければ **Jev**（`typesafe-ai/jev`）が `experimental_evaluate` の Choice で選ぶ
+4. アプリのコードがクリック、ファーム、待機、購入を実行し、ループする
 
-Jev does **not** see the screen and does **not** write code.
+Jev は画面を**見ません**。コードも**書きません**。
 
-## Requirements
+## 必要なもの
 
-- Node.js **22+** (AI SDK 7)
-- Vercel AI Gateway API key
+- Node.js **22+**（AI SDK 7）
+- Vercel AI Gateway の API キー
 
-## Setup
+## セットアップ
 
 ```bash
 git clone https://github.com/uzuraDev/cookie-clicker-jev.git
 cd cookie-clicker-jev
 cp .env.example .env
-# Edit .env and set AI_GATEWAY_API_KEY=...
+# .env を編集し、AI_GATEWAY_API_KEY=... を設定する
 
 npm install
 npx playwright install chromium
 ```
 
-### Environment
+### 環境変数
 
-| Variable | Required | Default | Description |
+| 変数 | 必須 | 既定値 | 説明 |
 | --- | --- | --- | --- |
-| `AI_GATEWAY_API_KEY` | yes for the default loop, and for 1HC when `JEV_ON_TIE` is on | — | Vercel AI Gateway API key. Never a TypeSafe direct key |
-| `HEADLESS` | no | `true` | Set `HEADLESS=false` to watch the browser |
-| `CHROME_CHANNEL` | no | — | Playwright channel when launching, e.g. `chrome` |
-| `MAX_STEPS` | no | `50` | Default loop only. Max steps before exit |
-| `EFFICIENT` | no | on | Default loop. `false` asks Jev every step (`click` / `wait` / `buy`) |
-| `STEP_DELAY_MS` | no | `0` | Pause after each default-loop action |
-| `FARM_MS` | no | `8000` | Cap for one `farm_to_next` action |
-| `SPEEDRUN_1HC` | no | off | `true` starts the 1 Heavenly Chip attempt |
-| `MODE` | no | — | `1hc` is the same switch as `SPEEDRUN_1HC=true` |
-| `CDP_URL` | no | — | Attach to Chromium (`http://127.0.0.1:9222`) instead of launching one |
-| `KEEP_TAB` | no | `true` | On CDP close, disconnect without quitting Chrome. `false` also closes the game tab |
-| `CLICK_INTERVAL_MS` | no | `25` | 1HC big-cookie gap. Raised to 21 if lower. See below |
-| `JEV_ON_TIE` | no | `true` | 1HC: ask Jev when ROI paybacks are close. `false` = local ROI only |
-| `JEV_TIE_RATIO` | no | `1.25` | Second payback within this multiple of the best triggers Jev |
-| `JEV_MIN_INTERVAL_MS` | no | `12000` | Minimum time between Jev purchase calls |
-| `BUY_INTERVAL_MS` | no | `250` | How often the 1HC loop considers a purchase |
-| `LOG_INTERVAL_MS` | no | `5000` | Status line interval |
-| `MAX_PAYBACK_SEC` | no | `180` | Buy when weighted payback is shorter than this |
-| `LUCKY_RESERVE` | no | `true` | After 1e6 baked, keep a Lucky bank unless a buff is up |
-| `SPEEDRUN_MAX_MS` | no | — | Stop early without ascending (debug). Not a successful finish |
+| `AI_GATEWAY_API_KEY` | デフォルトループでは必須。1HC では `JEV_ON_TIE` がオンのとき必須 | — | Vercel AI Gateway の API キー。TypeSafe の直接キーは使わない |
+| `HEADLESS` | いいえ | `true` | `HEADLESS=false` でブラウザを表示する |
+| `CHROME_CHANNEL` | いいえ | — | 起動時の Playwright チャネル。例: `chrome` |
+| `MAX_STEPS` | いいえ | `50` | デフォルトループのみ。終了までの最大ステップ数 |
+| `EFFICIENT` | いいえ | オン | デフォルトループ。`false` にすると毎ステップ Jev に聞く（`click` / `wait` / `buy`） |
+| `STEP_DELAY_MS` | いいえ | `0` | デフォルトループで、各行動のあとに入れる待ち |
+| `FARM_MS` | いいえ | `8000` | `farm_to_next` 1回の上限 |
+| `SPEEDRUN_1HC` | いいえ | オフ | `true` で 1 Heavenly Chip の挑戦を始める |
+| `MODE` | いいえ | — | `1hc` は `SPEEDRUN_1HC=true` と同じスイッチ |
+| `CDP_URL` | いいえ | — | Chromium を起動せず接続する（`http://127.0.0.1:9222`） |
+| `KEEP_TAB` | いいえ | `true` | CDP の切断時、Chrome は終了せずに切り離す。`false` だとゲームのタブも閉じる |
+| `CLICK_INTERVAL_MS` | いいえ | `25` | 1HC の大クッキー間隔。21 より小さい指定は 21 に引き上げる。下記を参照 |
+| `JEV_ON_TIE` | いいえ | `true` | 1HC では、ROI の回収時間が近いとき Jev に聞く。`false` はローカルの ROI のみ |
+| `JEV_TIE_RATIO` | いいえ | `1.25` | 2位の回収時間が、最良のこの倍率以内なら Jev を呼ぶ |
+| `JEV_MIN_INTERVAL_MS` | いいえ | `12000` | Jev の購入判断を呼ぶ最短間隔 |
+| `BUY_INTERVAL_MS` | いいえ | `250` | 1HC ループが購入を検討する間隔 |
+| `LOG_INTERVAL_MS` | いいえ | `5000` | ステータス行を出す間隔 |
+| `MAX_PAYBACK_SEC` | いいえ | `180` | 加重した回収時間がこれより短ければ買う |
+| `LUCKY_RESERVE` | いいえ | `true` | 焼成が 1e6 を超えたあと、バフ中でなければ Lucky 用の所持金を残す |
+| `SPEEDRUN_MAX_MS` | いいえ | — | 昇天せずに早めに止める（デバッグ）。成功扱いにはならない |
 
-## Run
+## 実行
 
-Efficient loop (default): local 80ms farms, skip Jev on a single buy, Jev when several buildings compete.
+efficient ループ（デフォルト）。ローカルで 80ms 間隔のファームを行い、購入が一つなら Jev を飛ばす。建物が複数で競うときだけ Jev を呼ぶ。
 
 ```bash
 npm start
 ```
 
-Watch the game, optionally in installed Chrome:
+ゲームを表示する。インストール済みの Chrome でもよい。
 
 ```bash
 HEADLESS=false CHROME_CHANNEL=chrome npm start
 ```
 
-One Jev choice every step (no paced farm):
+毎ステップ Jev が一つ選ぶ（間隔を置いたファームはしない）。
 
 ```bash
 EFFICIENT=false npm start
 ```
 
-Short run:
+短い実行。
 
 ```bash
 MAX_STEPS=10 npm start
 ```
 
-Stop anytime with `Ctrl+C`.
+いつでも `Ctrl+C` で止められる。
 
-Attach to a running Chromium (start it with `--remote-debugging-port=9222`). Closing the bot disconnects and leaves Chrome and the tab open (`KEEP_TAB` defaults to true). `KEEP_TAB=false` closes the game tab and still does not quit Chrome.
+起動済みの Chromium に接続する（`--remote-debugging-port=9222` を付けて起動しておく）。ボットを閉じると切断し、Chrome とタブは開いたまま残る（`KEEP_TAB` の既定は true）。`KEEP_TAB=false` はゲームのタブを閉じるが、Chrome 自体は終了しない。
 
 ```bash
 CDP_URL=http://127.0.0.1:9222 npm start
 ```
 
-## 1 Heavenly Chip attempt
+## 1 Heavenly Chip の挑戦
 
-Category reference: [speedrun.com — 1 Heavenly Chip](https://www.speedrun.com/cclicker), Dumpe, **5h 18m 16s**, Cookie Clicker **~2.052**, Golden Cookies + Fast Click (mouse-wheel). The goal is one prestige level: **1e12 cookies baked all time**, then ascend.
+カテゴリの参照は [speedrun.com — 1 Heavenly Chip](https://www.speedrun.com/cclicker)。Dumpe、**5時間18分16秒**、Cookie Clicker **~2.052**、Golden Cookies + Fast Click（マウスホイール）。目標はプレステージ 1 段階。**通算の焼成クッキー 1e12** に達したら昇天する。
 
 ```bash
 SPEEDRUN_1HC=true HEADLESS=false npm start
 ```
 
-or:
+または:
 
 ```bash
 HEADLESS=false npm run speedrun:1hc
 ```
 
-Attach to an existing Chromium (start it with `--remote-debugging-port=9222`). If a Cookie Clicker tab is already open, that tab is reused and not reloaded. `KEEP_TAB` defaults to true, so shutdown disconnects CDP and leaves Chrome and the tab running. `KEEP_TAB=false` closes the game tab only.
+既存の Chromium に接続する（`--remote-debugging-port=9222` を付けて起動しておく）。Cookie Clicker のタブがすでに開いていれば、再読み込みせずそのタブを使う。`KEEP_TAB` の既定は true なので、終了時は CDP を切断し、Chrome とタブはそのまま動き続ける。`KEEP_TAB=false` が閉じるのはゲームのタブだけ。
 
 ```bash
 SPEEDRUN_1HC=true CDP_URL=http://127.0.0.1:9222 npm start
 ```
 
-`CDP_URL` uses the browser you attached. **The run calls `Game.HardReset(2)`**, which wipes that profile's Cookie Clicker save (achievements, heavenly chips, and progress). A browser this process launches uses a fresh context, so the wipe stays inside that session. `CHROME_CHANNEL=chrome` launches installed Chrome instead of bundled Chromium.
+`CDP_URL` は、接続したブラウザを使う。**この実行は `Game.HardReset(2)` を呼ぶ**。接続先プロファイルの Cookie Clicker セーブ（実績、天界チップ、進行状況）は消える。このプロセスが自分で起動したブラウザは新しいコンテキストなので、消去はそのセッションの中に留まる。`CHROME_CHANNEL=chrome` は、同梱の Chromium ではなくインストール済みの Chrome を起動する。
 
-Local ROI only, no gateway call:
+ローカルの ROI だけ。ゲートウェイは呼ばない。
 
 ```bash
 SPEEDRUN_1HC=true JEV_ON_TIE=false npm start
 ```
 
-What it does:
+やっていることは次のとおり。
 
-1. Opens the official page (or the `CDP_URL` tab) and waits until the game is playable.
-2. Wipes the save. **The clock starts** when that fresh run accepts clicks (`Game.T >= 3`, cookies baked all time is 0, not ascending).
-3. An in-page loop calls `Game.ClickCookie()` every `CLICK_INTERVAL_MS` (default 25, about 40 clicks/s). During Click frenzy, Dragonflight, or Cursed finger the gap tightens to 21ms. Bare `Game.ClickCookie()` **drops** clicks closer than 20ms (`1000/50`). Clicks faster than ~15/s still count; the game may award Uncanny clicker. That matches a fast-click / mouse-wheel pace, not a burst the game ignores. The default efficient loop is a different pace: `farm_clicks_*` and `farm_to_next` wait 80ms between clicks (~12/s), which stays above both the discard floor and the ~67ms Uncanny threshold. 1HC does not use that 80ms farm.
-4. The same loop pops `Game.shimmers` (golden cookies, wrath cookies, reindeer, cookie-storm drops) and falls back to `.shimmer` if the array is empty. Golden cookies are not left on screen while the buyer thinks.
-5. Purchases are local. The page dry-runs `Game.CalculateGains` (achievements and unlocks stubbed) to estimate CpS and click gain, including the active buff. Early on it follows a cursor / click-upgrade / grandma / farm / mine order. After about 1e6 cookies baked it buys the best payback, with extra weight on click upgrades, finger upgrades, and kittens. **Lucky day, Serendipity, and Get lucky** are bought as soon as they are affordable. Frenzy, Dragon Harvest, Elder frenzy, and building specials (CpS multiplier ≥ 2) spend the bank and allow a longer payback. Click frenzy makes click upgrades win the ranking because their click delta is multiplied in the live sim. Wrath upgrades (One mind and the rest of the grandmapocalypse) are never bought.
-6. Jev (`typesafe-ai/jev`, `experimental_evaluate` Choice, `criteria`) runs only when two or more of those purchases are within `JEV_TIE_RATIO`, and at most once per `JEV_MIN_INTERVAL_MS`. Clicks and golden cookies never wait on Jev.
-7. At ≥ 1e12 cookies baked all time and ≥ 1 pending prestige, it calls `Game.Ascend(1)` and **stops the clock** when the ascending UI is visible (`#game.ascendIntro` / `#game.ascending`, or the Ascending note). The ~5 second intro is not added. It then waits for the ascend screen so prestige and heavenly chips are actually granted. It does **not** reincarnate. Rebirth and From scratch are awarded on Reincarnate, not on the ascend click.
+1. 公式ページ（または `CDP_URL` のタブ）を開き、プレイできるまで待つ。
+2. セーブを消す。**時計が始まる**のは、その新しいランがクリックを受け付けたとき（`Game.T >= 3`、通算の焼成クッキーは 0、昇天中ではない）。
+3. ページ内のループが、`CLICK_INTERVAL_MS` ごとに `Game.ClickCookie()` を呼ぶ（既定は 25 で、およそ秒間 40 クリック）。Click frenzy、Dragonflight、Cursed finger のあいだは、間隔を 21ms まで詰める。素の `Game.ClickCookie()` は、20ms より近いクリックを**破棄する**（`1000/50`）。秒間およそ 15 回を超えるクリックでもカウントはされ、Uncanny clicker が付くことがある。これはファストクリックやマウスホイールのペースに合わせたもので、ゲームが無視する連打ではない。デフォルトの efficient ループは別のペースで、`farm_clicks_*` と `farm_to_next` の間隔は 80ms（およそ秒間 12 回）。80ms は、破棄の下限（20ms）も Uncanny clicker のしきい値（約 67ms）も上回る。1HC はこの 80ms のファームを使わない。
+4. 同じループが `Game.shimmers`（ゴールデンクッキー、ラスクッキー、トナカイ、クッキーステームのドロップ）を割る。配列が空なら `.shimmer` にフォールバックする。購入側が考えているあいだ、ゴールデンクッキーを画面に残さない。
+5. 購入はローカルで決める。ページは `Game.CalculateGains` をドライランし（実績とアンロックはスタブ）、有効なバフを含めて CpS とクリック増加を見積もる。序盤は、カーソル、クリック強化、グランマ、ファーム、鉱山の順で買う。焼成がおよそ 1e6 を超えると、回収時間が最良のものを買い、クリック強化、指のアップグレード、キトンには追加の重みを付ける。**Lucky day、Serendipity、Get lucky** は、買えるようになったらすぐ買う。Frenzy、Dragon Harvest、Elder frenzy、建物スペシャル（CpS 倍率が 2 以上）では所持金を使い、より長い回収時間も許す。Click frenzy では、ライブのシミュレーションでクリックの増加分が乗算されるため、クリック強化が順位で勝つ。ラス系のアップグレード（One mind と、それ以降のグランマポカリプス）は買わない。
+6. Jev（`typesafe-ai/jev`、`experimental_evaluate` の Choice、`criteria`）が動くのは、それらの購入のうち二つ以上が `JEV_TIE_RATIO` 以内に入り、かつ `JEV_MIN_INTERVAL_MS` につき多くても一度のときだけ。クリックとゴールデンクッキーは、Jev を待たない。
+7. 通算の焼成クッキーが 1e12 以上で、取得見込みのプレステージが 1 以上なら、`Game.Ascend(1)` を呼ぶ。昇天 UI が見えた時点で**時計を止める**（`#game.ascendIntro` / `#game.ascending`、または Ascending のノート）。およそ 5 秒のイントロは加算しない。そのあと昇天画面を待ち、プレステージと天界チップが実際に付与されるまで確認する。**転生はしない**。Rebirth と From scratch が付くのは Reincarnate のときであり、昇天のクリックではない。
 
-Status lines look like:
+ステータス行は次のような形になる。
 
 ```text
 [t+0:01:02.000] baked=1.234e4 bank=500.0 cps=12.5 mouse=4.0 gc=1 clicks=2400 buys=6 buffs=Frenzy
 ```
 
-The run ends with:
+終了時は次のように出る。
 
 ```text
 RESULT: time=5:18:16.000 target=5:18:16 met=yes
 ```
 
-`met=yes` means the clock is ≤ 5:18:16 **and** the ascension is worth at least one heavenly chip. `Ctrl+C` or `SPEEDRUN_MAX_MS` prints `met=no`.
+`met=yes` は、時計が 5:18:16 以下**であり**、その昇天で天界チップが少なくとも 1 個得られることを意味する。`Ctrl+C` か `SPEEDRUN_MAX_MS` のときは `met=no` になる。
 
-### How this clock maps to speedrun.com
+### この時計と speedrun.com の対応
 
-SRC starts the timer on the **Wipe Save** click (the category requires a wipe even on a new save, because it resets the golden-cookie timer) and ends when you ascend. This bot's wipe is `Game.HardReset(2)`, the same call the second confirmation makes, with no dialog delay. The clock then waits until clicks register (about a tenth of a second). That is a bit later than a literal Wipe Save click and a bit earlier than a human sitting through both prompts. The end is the ascend action plus a visible ascending UI, which is the same moment a runner clicks Ascend, not the end of the choir animation.
+speedrun.com（SRC）は **Wipe Save** のクリックでタイマーを開始する（ゴールデンクッキーのタイマーをリセットするため、新規セーブでもワイプがカテゴリの条件になっている）。終了は昇天したとき。このボットのワイプは `Game.HardReset(2)` で、確認の 2 回目が呼ぶのと同じ関数であり、ダイアログの待ちはない。時計はそのあと、クリックが通るまで待つ（およそ 0.1 秒）。これは、文字どおりの Wipe Save クリックより少し遅く、人間が両方の確認を待つよりは少し早い。終了は、昇天の操作に加えて昇天中の UI が見えた時点であり、ランナーが Ascend をクリックした瞬間に相当する。合唱のアニメーションが終わる時点ではない。
 
-### This is not a leaderboard submission
+### リーダーボードへの投稿にはならない
 
-speedrun.com's Cookie Clicker rules disallow auto-clickers and add-ons. A fully automated run is for **beating the time**, not for submitting to the board. Treat a `met=yes` line as a local result.
+speedrun.com の Cookie Clicker ルールは、オートクリッカーとアドオンを禁止している。完全に自動のランは、**タイムを上回るため**のものであり、ボードへ投稿するためのものではない。`met=yes` の行は、手元の結果として扱う。
 
-The live site may not be exactly 2.052. The log prints `Game.version` and calls out a mismatch. The bot still plays; it does not pin an old build.
+公開中のサイトが、ちょうど 2.052 とは限らない。ログは `Game.version` を出し、食い違いがあれば知らせる。ボットはそのままプレイし、古いビルドには固定しない。
 
-Golden-cookie uptime and buying during Frenzy / Click frenzy / building specials are the parts most likely to decide a 5 hour attempt. The farmer never ignores a shimmer, and the buyer uses the buffed CpS and click values from the live game. It is not a hand-authored world-record route.
+5 時間の成否を分けやすいのは、ゴールデンクッキー効果が出ている時間と、Frenzy / Click frenzy / 建物スペシャルのあいだの購入である。ファーム側はシマーを見逃さず、購入側はライブのゲームから、バフ後の CpS とクリック値を使う。人手で組んだ世界記録のルートではない。
 
-## How the default loop works
+## デフォルトループの動き
 
-- **Boot** (`src/browser.ts`): open the official page, or attach with `CDP_URL` and reuse an existing Cookie Clicker tab. Preset English (`CookieClickerLang`) and the consent cookie (cookie writes on an existing CDP context are best-effort), then wait until `Game.ready` with the loader and the off-game message gone. `CHROME_CHANNEL` selects installed Chrome when this process launches the browser. On CDP, `close()` disconnects and does not quit Chrome; the tab stays unless `KEEP_TAB=false`.
-- **Overlays**: if the language prompt is still up, click `#langSelect-EN`. Notes (`.note .close`) are closed. The consent banner is removed in the page — its “Got it!” control is `<a target="_blank">`, so a normal click leaves the game. `#prefsButton` is not clicked; that opens Options.
-- **Observation**: cookies, CPS, click power, the cheapest unlocked building (`nextBuildingPrice`), affordable buildings ranked by `cpsGain / price`, and affordable upgrades. The top five buildings are the buy candidates in efficient mode.
-- **Efficient decisions** (`EFFICIENT` defaults to on):
-  - Nothing affordable → `farm_to_next` (or `farm_clicks_200` if every unlocked building is already affordable). No Jev call.
-  - Exactly one `buy_*` key → buy it. No Jev call.
-  - Any affordable upgrade → buy the cheapest upgrade. No Jev call.
-  - Otherwise Jev sees purchases plus `farm_*` / `stop` (click and wait keys are omitted).
-- **`EFFICIENT=false` candidates**: `click_cookie`, `buy_building_N`, `buy_upgrade_N`, `wait_1s`, `wait_5s`, `stop`. Every step asks Jev.
-- **Decision** (`src/jev.ts`): AI SDK `experimental_evaluate` with model `typesafe-ai/jev` and a `choice` question. The option map field is `criteria` (key → description). The instruction prefers upgrades, then the best payback, then `farm_to_next` / `farm_clicks_*` over waiting. Authenticated only through AI Gateway (`AI_GATEWAY_API_KEY`). Never calls TypeSafe’s direct API. A Jev error falls back to the cheapest listed upgrade, else the best-efficiency building, else `farm_clicks_200`.
-- **Execution**:
-  - `click_cookie` calls `Game.ClickCookie()` (a DOM click is only the fallback; overlays often cover `#bigCookie`).
-  - `farm_clicks_N` and `farm_to_next` call `Game.ClickCookie()` with an **80ms** gap (~12 clicks/s). Cookie Clicker drops clicks closer than 20ms, and gaps under ~67ms can award Uncanny clicker; 80ms stays clear of both. `farm_to_next` stops when the cheapest unlocked building is affordable, or after `FARM_MS` (default 8000).
-  - `buy_building_N` calls `Game.ObjectsById[N].buy(1)` and checks that the owned count increased. It refuses when the building is locked, too expensive, or the store is in Sell mode.
-  - `buy_upgrade_N` calls `Game.UpgradesById[N].buy()` and checks the bought flag.
-  - `wait_1s` / `wait_5s` just wait (only offered when `EFFICIENT=false`).
+- **起動**（`src/browser.ts`）: 公式ページを開く。または `CDP_URL` で接続し、既存の Cookie Clicker タブを再利用する。言語は英語にあらかじめ設定する（`CookieClickerLang`）。同意クッキーも入れる（既存の CDP コンテキストへの書き込みはベストエフォート）。そのあと、ローダーとオフゲームのメッセージが消え、`Game.ready` になるまで待つ。`CHROME_CHANNEL` は、このプロセスがブラウザを起動するときに、インストール済みの Chrome を選ぶ。CDP では `close()` は切断するだけで、Chrome は終了しない。タブは `KEEP_TAB=false` でない限り残る。
+- **オーバーレイ**: 言語の選択がまだ出ていれば、`#langSelect-EN` をクリックする。ノート（`.note .close`）は閉じる。同意バナーはページ内で取り除く。「Got it!」は `<a target="_blank">` なので、普通にクリックするとゲームから離れてしまう。`#prefsButton` はクリックしない。押すと Options が開く。
+- **観測**: クッキー数、CPS、クリック威力、アンロック済みで最安の建物（`nextBuildingPrice`）、`cpsGain / price` で順位を付けた購入可能な建物、購入可能なアップグレード。efficient モードでは、上位 5 つの建物が購入候補になる。
+- **efficient の判断**（`EFFICIENT` の既定はオン）:
+  - 買えるものがない → `farm_to_next`（アンロック済みの建物がすべて買えるなら `farm_clicks_200`）。Jev は呼ばない。
+  - `buy_*` のキーがちょうど一つ → それを買う。Jev は呼ばない。
+  - 買えるアップグレードがある → 最安のアップグレードを買う。Jev は呼ばない。
+  - それ以外では、Jev に購入候補と `farm_*` / `stop` を渡す（click と wait のキーは除く）。
+- **`EFFICIENT=false` の候補**: `click_cookie`、`buy_building_N`、`buy_upgrade_N`、`wait_1s`、`wait_5s`、`stop`。毎ステップ Jev に聞く。
+- **判断**（`src/jev.ts`）: AI SDK の `experimental_evaluate`。モデルは `typesafe-ai/jev`、質問は `choice`。選択肢マップのフィールドは `criteria`（キー → 説明）。指示は、アップグレードを優先し、次に回収時間が最良のもの、その次に待機より `farm_to_next` / `farm_clicks_*` を優先する。認証は AI Gateway（`AI_GATEWAY_API_KEY`）だけ。TypeSafe の API を直接呼ぶことはない。Jev がエラーのときは、一覧にある最安のアップグレード、なければ効率が最良の建物、それもなければ `farm_clicks_200` に戻る。
+- **実行**:
+  - `click_cookie` は `Game.ClickCookie()` を呼ぶ（DOM クリックはフォールバックだけ。オーバーレイが `#bigCookie` を覆っていることが多い）。
+  - `farm_clicks_N` と `farm_to_next` は、**80ms** 間隔で `Game.ClickCookie()` を呼ぶ（およそ秒間 12 クリック）。Cookie Clicker は 20ms より近いクリックを破棄し、間隔がおよそ 67ms 未満だと Uncanny clicker が付くことがある。80ms はそのどちらにも掛からない。`farm_to_next` は、アンロック済みで最安の建物が買えるようになるか、`FARM_MS`（既定 8000）を過ぎると止まる。
+  - `buy_building_N` は `Game.ObjectsById[N].buy(1)` を呼び、所持数が増えたことを確認する。建物がロックされている、高すぎる、ストアが Sell モード、のいずれかでは拒否する。
+  - `buy_upgrade_N` は `Game.UpgradesById[N].buy()` を呼び、購入済みフラグを確認する。
+  - `wait_1s` / `wait_5s` は待つだけ（候補に入るのは `EFFICIENT=false` のときだけ）。
 
-Each step logs `state:`, then `local:` or `jev: <action>`, and `result: ok|fail`.
+各ステップは `state:` を出し、続いて `local:` または `jev: <action>`、そして `result: ok|fail` を出す。
 
-## Troubleshooting
+## うまく動かないとき
 
-If the tab stays on Cloudflare’s “Just a moment…” page, run with a visible browser:
+タブが Cloudflare の “Just a moment…” のままなら、ブラウザを表示して実行する。
 
 ```bash
 HEADLESS=false npm start
 ```
 
-Headless Chromium is more likely to be challenged. The default is still headless (`HEADLESS` unset or anything other than `false`).
+ヘッドレスの Chromium の方が、チャレンジされやすい。既定はヘッドレスのまま（`HEADLESS` が未設定、または `false` 以外）。
 
-## Typecheck and unit tests
+## 型チェックとユニットテスト
 
 ```bash
 npm run typecheck
 npm test
 ```
 
-The tests cover the clock, the click-interval floor, and the purchase picker (early route, golden-cookie upgrades, Frenzy bank, Click frenzy ranking, Jev ties). They do not play a five-hour game.
+テストがカバーするのは、時計、クリック間隔の下限、購入の選び方（序盤ルート、ゴールデンクッキーのアップグレード、Frenzy 中の所持金、Click frenzy の順位、Jev の僅差）である。5 時間のゲーム自体はプレイしない。
 
-## License
+## ライセンス
 
 MIT
